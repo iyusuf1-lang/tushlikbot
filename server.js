@@ -6,7 +6,7 @@ const { Telegraf, Markup } = require('telegraf');
 const store = require('./store');
 
 const BOT_TOKEN = process.env.8976669218:AAGbKlgtU3Eg4ynV_qGXs3t9R4XMjEocujY;
-const WEBAPP_URL = process.env.WEBAPP_URL;
+const WEBAPP_URL = process.env.tushlikbot-production-b4a3.up.railway.app;
 const PORT = process.env.PORT || 3000;
 const ADMIN_IDS = (process.env.ADMIN_IDS || '')
   .split(',')
