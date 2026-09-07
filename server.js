@@ -17,7 +17,7 @@ if (!WEBAPP_URL) {
   console.warn('Ogohlantirish: WEBAPP_URL o\'rnatilmagan. Bot tugmasi ishlamasligi mumkin.');
 }
 
-const bot = new Telegraf("8976669218:AAGbKlgtU3Eg4ynV_qGXs3t9R4XMjEocujY");
+const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
