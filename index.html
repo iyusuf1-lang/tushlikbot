@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Bugungi obed</title>
+<link rel="stylesheet" href="style.css" />
+<script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+</head>
+<body>
+  <main class="wrap">
+    <header class="top">
+      <span class="eyebrow" id="today-date">Bugun</span>
+      <h1>Obed jadvali</h1>
+    </header>
+
+    <!-- 1-EKRAN: restoranlar ro'yxati -->
+    <section class="panel" id="restaurant-section">
+      <h2>1. Restoranni tanlang</h2>
+      <div id="restaurant-list" class="restaurant-list"></div>
+    </section>
+
+    <!-- 2-EKRAN: tanlangan restoran menyusi -->
+    <section class="panel" id="menu-section" hidden>
+      <button type="button" id="back-btn" class="back-btn">← Restoranlarga qaytish</button>
+      <h2 id="menu-restaurant-name">Menyu</h2>
+      <div id="menu-site-link" class="menu-site-link" hidden>
+        <button type="button">🔗 Saytdagi to'liq menyuni ko'rish</button>
+      </div>
+      <div id="menu-list" class="menu-list"></div>
+
+      <div class="comment-field">
+        <label for="comment-input">Izoh (ixtiyoriy)</label>
+        <textarea id="comment-input" rows="2" maxlength="300" placeholder="Masalan: menyuda yo'q boshqa taom so'rash uchun yozing"></textarea>
+      </div>
+
+      <div class="my-summary">
+        <span>Sizning summangiz</span>
+        <strong id="my-total">0 so'm</strong>
+      </div>
+
+      <div class="actions">
+        <button id="submit-btn" class="btn-primary">Buyurtmani yuborish</button>
+        <button id="clear-btn" class="btn-ghost">Bu restorandagi buyurtmani bekor qilish</button>
+      </div>
+      <p id="status" class="status" aria-live="polite"></p>
+    </section>
+
+    <!-- Umumiy jadval: har doim ko'rinadi -->
+    <section class="panel">
+      <h2>Bugungi umumiy jadval</h2>
+      <div id="orders-container">
+        <p class="empty-note" id="empty-note">Hali hech kim buyurtma bermadi</p>
+      </div>
+      <div class="grand-total-row" id="grand-total-row" hidden>
+        <span>Umumiy summa (barcha restoranlar)</span>
+        <strong id="grand-total">0 so'm</strong>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
