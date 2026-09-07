@@ -1,0 +1,356 @@
+require('dotenv').config();
+const express = require('express');
+const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
+const { Telegraf, Markup } = require('telegraf');
+const store = require('./store');
+
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const WEBAPP_URL = process.env.WEBAPP_URL;
+const PORT = process.env.PORT || 3000;
+const ADMIN_IDS = (process.env.ADMIN_IDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .map(Number);
+
+if (!BOT_TOKEN) {
+  console.error("Xatolik: .env faylda BOT_TOKEN ko'rsatilmagan!");
+  process.exit(1);
+}
+if (!WEBAPP_URL) {
+  console.warn("Ogohlantirish: WEBAPP_URL o'rnatilmagan. Bot tugmasi ishlamasligi mumkin.");
+}
+if (!ADMIN_IDS.length) {
+  console.warn("Ogohlantirish: ADMIN_IDS o'rnatilmagan. /id buyrug'i orqali ID'ingizni bilib, Variables'ga qo'shing.");
+}
+
+const bot = new Telegraf(BOT_TOKEN);
+const app = express();
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// TEKSHIRUV: server public/ papkasida aynan nimani ko'rayotganini logga chiqaradi
+const PUBLIC_DIR = path.join(__dirname, 'public');
+console.log('__dirname:', __dirname);
+console.log('public papka manzili:', PUBLIC_DIR);
+try {
+  console.log('public papkadagi fayllar:', fs.readdirSync(PUBLIC_DIR));
+} catch (e) {
+  console.error('XATOLIK: public papkasini o\'qib bo\'lmadi ->', e.message);
+}
+
+function isAdmin(ctx) {
+  return ADMIN_IDS.includes(ctx.from.id);
+}
+
+function isValidUrl(url) {
+  return /^https?:\/\//i.test(url);
+}
+
+// ---------- Telegram WebApp initData ni tekshirish ----------
+// https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+function validateInitData(initData) {
+  if (!initData) return null;
+  const params = new URLSearchParams(initData);
+  const hash = params.get('hash');
+  if (!hash) return null;
+  params.delete('hash');
+
+  const pairs = [];
+  for (const [key, value] of params.entries()) pairs.push(`${key}=${value}`);
+  pairs.sort();
+  const dataCheckString = pairs.join('\n');
+
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+  const computedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+
+  if (computedHash !== hash) return null;
+
+  const userStr = params.get('user');
+  if (!userStr) return null;
+  try {
+    return JSON.parse(userStr);
+  } catch {
+    return null;
+  }
+}
+
+// Toshkent vaqti (UTC+5) bo'yicha bugungi sana
+function todayStr() {
+  const now = new Date(Date.now() + 5 * 60 * 60 * 1000);
+  return now.toISOString().slice(0, 10);
+}
+
+// ---------- API ----------
+
+app.get('/api/restaurants', (req, res) => {
+  const restaurants = store.getRestaurants();
+  res.json(restaurants.map((r) => ({ id: r.id, name: r.name, url: r.url || null, itemCount: r.items.length })));
+});
+
+app.get('/api/restaurants/:id/menu', (req, res) => {
+  const restaurant = store.getRestaurant(req.params.id);
+  if (!restaurant) return res.status(404).json({ error: 'Restoran topilmadi' });
+  res.json(restaurant);
+});
+
+app.get('/api/orders', (req, res) => {
+  const date = req.query.date || todayStr();
+  const rows = store.getOrders(date);
+
+  const byRestaurant = {};
+  let grandTotal = 0;
+  for (const row of rows) {
+    const rid = row.restaurant_id;
+    if (!byRestaurant[rid]) {
+      byRestaurant[rid] = { restaurant_id: rid, restaurant_name: row.restaurant_name, users: {}, subtotal: 0 };
+    }
+    const group = byRestaurant[rid];
+    if (!group.users[row.user_id]) {
+      group.users[row.user_id] = { user_name: row.user_name, items: [], total: 0 };
+    }
+    const lineTotal = row.price * row.qty;
+    group.users[row.user_id].items.push({ name: row.item_name, price: row.price, qty: row.qty, lineTotal });
+    group.users[row.user_id].total += lineTotal;
+    group.subtotal += lineTotal;
+    grandTotal += lineTotal;
+  }
+
+  const restaurants = Object.values(byRestaurant).map((g) => ({ ...g, users: Object.values(g.users) }));
+  res.json({ date, restaurants, grandTotal });
+});
+
+app.post('/api/order', (req, res) => {
+  const { initData, restaurant_id, items } = req.body || {};
+  const user = validateInitData(initData);
+  if (!user) return res.status(401).json({ error: 'Tasdiqlanmadi — Telegram ichidan oching' });
+
+  const restaurant = store.getRestaurant(restaurant_id);
+  if (!restaurant) return res.status(404).json({ error: 'Restoran topilmadi' });
+
+  const date = todayStr();
+  const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || `ID ${user.id}`;
+  store.replaceUserOrder(date, user.id, userName, restaurant.id, restaurant.name, items || []);
+  res.json({ ok: true });
+});
+
+app.delete('/api/order', (req, res) => {
+  const { initData, restaurant_id } = req.body || {};
+  const user = validateInitData(initData);
+  if (!user) return res.status(401).json({ error: 'Tasdiqlanmadi' });
+
+  store.clearUserOrder(todayStr(), user.id, Number(restaurant_id));
+  res.json({ ok: true });
+});
+
+// ---------- Bot: umumiy buyruqlar ----------
+
+// WEBAPP_URL noto'g'ri/bo'sh bo'lsa ham bot butunlay qulab tushmasligi uchun
+function replyWithWebApp(ctx, text) {
+  if (WEBAPP_URL && isValidUrl(WEBAPP_URL)) {
+    return ctx.reply(text, Markup.inlineKeyboard([Markup.button.webApp('🍽 Obedni ochish', WEBAPP_URL)]));
+  }
+  return ctx.reply(
+    `${text}\n\n⚠️ WEBAPP_URL sozlanmagan yoki noto'g'ri. Railway'ning Variables bo'limida WEBAPP_URL ni to'g'ri https:// manzil bilan to'ldiring.`
+  );
+}
+
+bot.start((ctx) => {
+  replyWithWebApp(ctx, "Assalomu alaykum! Bugungi obedni buyurtma qilish uchun tugmani bosing 👇");
+});
+
+bot.command('obed', (ctx) => {
+  replyWithWebApp(ctx, "Bugungi obed 👇 Kerakli restoranni tanlab, buyurtma bering.");
+});
+
+bot.command('id', (ctx) => {
+  ctx.reply(`Sizning Telegram ID'ingiz: ${ctx.from.id}`);
+});
+
+// Bugungi (yoki berilgan sanadagi) buyurtmalarni chiroyli chek ko'rinishida matn qilib beradi
+function buildReceiptText(date) {
+  const rows = store.getOrders(date);
+  if (!rows.length) return `🧾 ${date} uchun hali hech kim buyurtma bermagan.`;
+
+  const byRestaurant = {};
+  let grandTotal = 0;
+  for (const row of rows) {
+    const rid = row.restaurant_id;
+    if (!byRestaurant[rid]) {
+      byRestaurant[rid] = { name: row.restaurant_name, users: {}, subtotal: 0 };
+    }
+    const g = byRestaurant[rid];
+    if (!g.users[row.user_id]) g.users[row.user_id] = { name: row.user_name, items: [], total: 0 };
+    const lineTotal = row.price * row.qty;
+    g.users[row.user_id].items.push(`${row.item_name} ×${row.qty}`);
+    g.users[row.user_id].total += lineTotal;
+    g.subtotal += lineTotal;
+    grandTotal += lineTotal;
+  }
+
+  let text = `🧾 Umumiy chek — ${date}\n`;
+  for (const g of Object.values(byRestaurant)) {
+    text += `\n🍽 ${g.name}\n`;
+    for (const u of Object.values(g.users)) {
+      text += `  ${u.name} — ${u.items.join(', ')} — ${u.total.toLocaleString()} so'm\n`;
+    }
+    text += `  Jami: ${g.subtotal.toLocaleString()} so'm\n`;
+  }
+  text += `\n💰 UMUMIY SUMMA: ${grandTotal.toLocaleString()} so'm`;
+  return text;
+}
+
+bot.command('chek', (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ Bu buyruq faqat adminlar uchun.');
+  ctx.reply(buildReceiptText(todayStr()));
+});
+
+bot.command('restoranlar', (ctx) => {
+  const restaurants = store.getRestaurants();
+  if (!restaurants.length) return ctx.reply("Hozircha restoranlar qo'shilmagan.");
+  const text = restaurants
+    .map((r) => `#${r.id} — ${r.name} (${r.items.length} ta taom)${r.url ? `\n   🔗 ${r.url}` : ''}`)
+    .join('\n');
+  ctx.reply(`🍽 Restoranlar ro'yxati:\n${text}`);
+});
+
+bot.command('yordam', (ctx) => {
+  ctx.reply(
+    "📋 Buyruqlar:\n" +
+      '/obed — bugungi obed jadvalini ochish\n' +
+      "/restoranlar — restoranlar ro'yxati\n" +
+      "/id — sizning Telegram ID'ingiz\n\n" +
+      'Admin uchun:\n' +
+      "/chek — bugungi umumiy chekni matn ko'rinishida olish\n" +
+      '/restoran_qoshish Nomi\n' +
+      '/restoran_qoshish Nomi | https://sayt.uz  (sayt havolasi bilan)\n' +
+      "/restoran_sayt restoran_id | https://sayt.uz  (havolani qo'shish/o'zgartirish)\n" +
+      "/restoran_sayt restoran_id | -  (havolani olib tashlash)\n" +
+      "/taom_qoshish restoran_id | Taom nomi | Narxi\n" +
+      "/taom_ochirish restoran_id | taom_id\n" +
+      '/restoran_ochirish restoran_id'
+  );
+});
+
+// ---------- Bot: admin buyruqlari ----------
+
+bot.command('restoran_qoshish', (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ Bu buyruq faqat adminlar uchun.');
+  const raw = ctx.message.text.split(' ').slice(1).join(' ').trim();
+  if (!raw) {
+    return ctx.reply(
+      "Foydalanish: /restoran_qoshish Nomi\nyoki sayt bilan: /restoran_qoshish Nomi | https://sayt.uz"
+    );
+  }
+  const parts = raw.split('|').map((s) => s.trim());
+  const name = parts[0];
+  const urlRaw = parts[1];
+  if (urlRaw && !isValidUrl(urlRaw)) {
+    return ctx.reply('Havola http:// yoki https:// bilan boshlanishi kerak.');
+  }
+  const r = store.addRestaurant(name, urlRaw || null);
+  const urlNote = r.url ? `\n🔗 Sayt: ${r.url}` : '';
+  ctx.reply(`✅ "${r.name}" qo'shildi (ID: ${r.id}).${urlNote}\nEndi taom qo'shing:\n/taom_qoshish ${r.id} | Taom nomi | Narxi`);
+});
+
+bot.command('restoran_sayt', (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ Bu buyruq faqat adminlar uchun.');
+  const raw = ctx.message.text.split(' ').slice(1).join(' ');
+  const parts = raw.split('|').map((s) => s.trim());
+  const rid = Number(parts[0]);
+  const urlRaw = parts[1];
+  if (!rid || !urlRaw) {
+    return ctx.reply(
+      "Foydalanish: /restoran_sayt restoran_id | https://sayt.uz\nOlib tashlash uchun: /restoran_sayt restoran_id | -"
+    );
+  }
+  const url = urlRaw === '-' ? null : urlRaw;
+  if (url && !isValidUrl(url)) {
+    return ctx.reply('Havola http:// yoki https:// bilan boshlanishi kerak.');
+  }
+  const ok = store.setRestaurantUrl(rid, url);
+  if (!ok) return ctx.reply(`ID ${rid} bilan restoran topilmadi.`);
+  ctx.reply(url ? `✅ Sayt havolasi saqlandi: ${url}` : "✅ Sayt havolasi olib tashlandi.");
+});
+
+bot.command('taom_qoshish', (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ Bu buyruq faqat adminlar uchun.');
+
+  // Xabar bir nechta qatordan iborat bo'lishi mumkin (har bir qatorda bitta taom).
+  // Har bir qatorning boshidagi "/taom_qoshish" so'zi bo'lsa ham, bo'lmasa ham ishlaydi.
+  const lines = ctx.message.text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const results = [];
+
+  for (const line of lines) {
+    const withoutCmd = line.replace(/^\/taom_qoshish(@\S+)?\s*/i, '');
+    if (!withoutCmd) continue; // faqat "/taom_qoshish" yozilgan, argumentsiz qator — o'tkazib yuboriladi
+
+    const parts = withoutCmd.split('|').map((s) => s.trim());
+    if (parts.length < 3) {
+      results.push(`❌ Noto'g'ri format: "${line}"`);
+      continue;
+    }
+    const [ridStr, name, priceStr] = parts;
+    const rid = Number(ridStr);
+    const price = Number(priceStr.replace(/[^\d]/g, ''));
+    if (!rid || !name || !price) {
+      results.push(`❌ Ma'lumot noto'g'ri: "${line}"`);
+      continue;
+    }
+    const item = store.addMenuItem(rid, name, price);
+    if (!item) {
+      results.push(`❌ ID ${rid} bilan restoran topilmadi: "${name}"`);
+      continue;
+    }
+    results.push(`✅ "${name}" — ${price.toLocaleString()} so'm`);
+  }
+
+  if (!results.length) {
+    return ctx.reply(
+      'Foydalanish: /taom_qoshish restoran_id | Taom nomi | Narxi\n' +
+        "Masalan: /taom_qoshish 1 | Osh | 20000\n\n" +
+        "Bir nechtasini bitta xabarda, har birini alohida qatorga yozib ham yuborishingiz mumkin."
+    );
+  }
+
+  ctx.reply(results.join('\n'));
+});
+
+bot.command('taom_ochirish', (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ Bu buyruq faqat adminlar uchun.');
+  const raw = ctx.message.text.split(' ').slice(1).join(' ');
+  const parts = raw.split('|').map((s) => s.trim());
+  const rid = Number(parts[0]);
+  const iid = Number(parts[1]);
+  if (!rid || !iid) return ctx.reply('Foydalanish: /taom_ochirish restoran_id | taom_id');
+  const ok = store.deleteMenuItem(rid, iid);
+  ctx.reply(ok ? "✅ Taom o'chirildi." : 'Topilmadi.');
+});
+
+bot.command('restoran_ochirish', (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ Bu buyruq faqat adminlar uchun.');
+  const rid = Number(ctx.message.text.split(' ')[1]);
+  if (!rid) return ctx.reply('Foydalanish: /restoran_ochirish restoran_id');
+  const ok = store.deleteRestaurant(rid);
+  ctx.reply(ok ? "✅ Restoran o'chirildi." : 'Topilmadi.');
+});
+
+bot.catch((err, ctx) => {
+  console.error(`Bot xatosi (${ctx.updateType}):`, err.message || err);
+});
+
+bot.launch();
+console.log('Bot ishga tushdi (polling rejimida)');
+
+app.listen(PORT, () => {
+  console.log(`Server ${PORT}-portda ishga tushdi`);
+});
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
