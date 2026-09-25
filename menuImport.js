@@ -30,17 +30,26 @@ for (const [addr, prefix] of [
 ]) {
   privateRanges.addSubnet(addr, prefix, 'ipv4');
 }
-for (const [addr, prefix] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['::ffff:0:0', 96]]) {
+// Diqqat: bu yerga "::ffff:0:0/96" qo'shmang — BlockList IPv4 manzillarni ham shu
+// qoidaga moslab tekshiradi va natijada BARCHA IPv4 saytlar bloklanib qoladi.
+// IPv4-mapped manzillar (::ffff:10.0.0.1) isPrivateAddress() ichida IPv4'ga aylantiriladi.
+for (const [addr, prefix] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10]]) {
   privateRanges.addSubnet(addr, prefix, 'ipv6');
+}
+
+function isPrivateAddress(address) {
+  const mapped = address.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (mapped) return privateRanges.check(mapped[1], 'ipv4');
+  return privateRanges.check(address, net.isIPv6(address) ? 'ipv6' : 'ipv4');
 }
 
 async function assertPublicUrl(url) {
   const u = new URL(url);
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error("Faqat http/https havolalar qo'llab-quvvatlanadi");
   const host = u.hostname.replace(/^\[|\]$/g, '');
-  const addresses = net.isIP(host) ? [{ address: host, family: net.isIP(host) }] : await dns.lookup(host, { all: true });
-  for (const { address, family } of addresses) {
-    if (privateRanges.check(address, family === 6 ? 'ipv6' : 'ipv4')) {
+  const addresses = net.isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true });
+  for (const { address } of addresses) {
+    if (isPrivateAddress(address)) {
       throw new Error("Bu manzil ichki tarmoqqa tegishli — ruxsat yo'q");
     }
   }
@@ -315,4 +324,4 @@ async function downloadImage(url, imagesDir, prefix) {
   return `/images/${filename}`;
 }
 
-module.exports = { scrapeMenu, downloadImage, parsePrice, extractFromJson, extractFromHtml };
+module.exports = { scrapeMenu, downloadImage, parsePrice, extractFromJson, extractFromHtml, isPrivateAddress };
