@@ -24,14 +24,20 @@ function renderTodayLabel() {
   document.getElementById('today-date').textContent = `${weekday}, ${d}.${m < 10 ? '0' + m : m}`;
 }
 
+// ✅ to'landi, ⏳ chek yuborilgan (admin tekshirmoqda), ❌ to'lanmagan
+const PAY_MARKS = { paid: '✅', pending: '⏳' };
+
 function formatSom(n) {
   return `${n.toLocaleString('ru-RU')} so'm`;
 }
 
 function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function openExternal(url) {
@@ -231,9 +237,10 @@ function updateMyTotal() {
 }
 
 document.getElementById('submit-btn').addEventListener('click', async () => {
+  // Serverga faqat taom ID'si va soni yuboriladi — narxni server menyudan o'zi oladi
   const items = currentRestaurant.items
     .filter((item) => qtyMap[item.id] > 0)
-    .map((item) => ({ name: item.name, price: item.price, qty: qtyMap[item.id] }));
+    .map((item) => ({ id: item.id, qty: qtyMap[item.id] }));
   const comment = document.getElementById('comment-input').value.trim();
 
   if (!items.length && !comment) {
@@ -254,6 +261,10 @@ document.getElementById('submit-btn').addEventListener('click', async () => {
     }
     tg?.HapticFeedback?.notificationOccurred('success');
     showStatus('Buyurtma yuborildi ✓');
+    currentRestaurant.items.forEach((item) => { qtyMap[item.id] = 0; });
+    document.getElementById('comment-input').value = '';
+    renderMenu();
+    loadCurrentOrderNote(currentRestaurant.id);
     loadOrders();
   } catch {
     showStatus('Xatolik: Mini App Telegram ichida ochilishi kerak', true);
@@ -282,18 +293,25 @@ document.getElementById('clear-btn').addEventListener('click', async () => {
 // ---------- Umumiy jadval (restoran bo'yicha guruhlangan) ----------
 
 async function loadOrders() {
-  const res = await fetch('/api/orders');
-  renderOrders(await res.json());
+  try {
+    const res = await fetch('/api/orders?initData=' + encodeURIComponent(getInitData()));
+    renderOrders(res.ok ? await res.json() : null);
+  } catch {
+    // tarmoq xatosi — keyingi yangilanishda qayta urinamiz
+  }
 }
 
+// data === null: foydalanuvchi tasdiqlanmagan (Mini App Telegram tashqarisida ochilgan)
 function renderOrders(data) {
   const container = document.getElementById('orders-container');
   const grandRow = document.getElementById('grand-total-row');
   const deliveryNote = document.getElementById('delivery-note');
   const finalBreakdown = document.getElementById('final-breakdown');
 
-  if (!data.restaurants.length) {
-    container.innerHTML = '<p class="empty-note" id="empty-note">Hali hech kim buyurtma bermadi</p>';
+  if (!data || !data.restaurants.length) {
+    container.innerHTML = data
+      ? '<p class="empty-note" id="empty-note">Hali hech kim buyurtma bermadi</p>'
+      : '<p class="empty-note" id="empty-note">Jadvalni ko\'rish uchun Mini App\'ni Telegram ichidan oching</p>';
     grandRow.hidden = true;
     deliveryNote.hidden = true;
     finalBreakdown.hidden = true;
@@ -341,9 +359,10 @@ function renderOrders(data) {
     finalBreakdown.hidden = false;
     document.getElementById('final-breakdown-body').innerHTML = data.userSummaries
       .map((u) => {
+        const mark = PAY_MARKS[u.payStatus] || '❌';
         const paidCell = appState.isAdmin
-          ? `<button type="button" class="paid-toggle ${u.paid ? 'is-paid' : 'is-unpaid'}" data-user-id="${u.user_id}" data-paid="${u.paid}">${u.paid ? '✅' : '❌'}</button>`
-          : `<span class="paid-badge">${u.paid ? '✅' : '❌'}</span>`;
+          ? `<button type="button" class="paid-toggle ${u.paid ? 'is-paid' : 'is-unpaid'}" data-user-id="${u.user_id}" data-paid="${u.paid}">${mark}</button>`
+          : `<span class="paid-badge">${mark}</span>`;
         return `
           <tr>
             <td>${escapeHtml(u.user_name)}</td>
@@ -385,6 +404,7 @@ document.getElementById('final-breakdown-body').addEventListener('click', async 
 async function loadBootstrap() {
   try {
     const res = await fetch('/api/bootstrap?initData=' + encodeURIComponent(getInitData()));
+    if (!res.ok) throw new Error();
     const data = await res.json();
     restaurants = data.restaurants;
     appState = { isAdmin: data.isAdmin, cardNumber: data.cardNumber };

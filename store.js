@@ -5,77 +5,88 @@ const path = require('path');
 // (masalan /app/data/store.json), aks holda qayta deploy qilinganda ma'lumot tozalanadi.
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'store.json');
 
-// Boshlang'ich restoran/menyu. Buni endi botdagi admin buyruqlari orqali
-// (/restoran_qoshish, /taom_qoshish, /restoran_sayt) o'zgartirish mumkin, kodga tegmasdan.
+// Saytdan import qilingan taom rasmlari shu yerga yuklab olinadi
+// (store.json bilan bir papkada — Volume ulansa, rasmlar ham saqlanib qoladi).
+const IMAGES_DIR = path.join(path.dirname(DB_PATH), 'images');
+
+// Boshlang'ich restoran/menyu. Buni botdagi admin buyruqlari orqali
+// (/restoran_qoshish, /taom_qoshish, /menyu_import) o'zgartirish mumkin, kodga tegmasdan.
 const DEFAULT_RESTAURANTS = [
   {
     id: 1,
     name: "Standart menyu",
     url: null,
     items: [
-      { id: 1, name: "Osh", price: 20000 },
-      { id: 2, name: "Lag'mon", price: 18000 },
-      { id: 3, name: "Shashlik", price: 15000 },
-      { id: 4, name: "Manti (5 dona)", price: 15000 },
-      { id: 5, name: "Salat", price: 8000 },
-      { id: 6, name: "Choy / Kompot", price: 3000 },
+      { id: 1, name: "Osh", price: 20000, image: null },
+      { id: 2, name: "Lag'mon", price: 18000, image: null },
+      { id: 3, name: "Shashlik", price: 15000, image: null },
+      { id: 4, name: "Manti (5 dona)", price: 15000, image: null },
+      { id: 5, name: "Salat", price: 8000, image: null },
+      { id: 6, name: "Choy / Kompot", price: 3000, image: null },
     ],
   },
 ];
 
-function ensureStore() {
-  const dir = path.dirname(DB_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(DB_PATH)) {
-    fs.writeFileSync(
-      DB_PATH,
-      JSON.stringify(
-        { restaurants: DEFAULT_RESTAURANTS, orders: [], comments: [], payments: [], settings: {}, users: [] },
-        null,
-        2
-      )
-    );
-  }
-}
+// To'lov holatlari
+const PAID = 'paid';
+const PENDING = 'pending'; // chek yuborilgan, admin tasdiqlashini kutmoqda
 
 // Xotirada saqlab qo'yiladi — har bir so'rovda diskdan qayta o'qimaslik uchun
 // (Mini App har 5 soniyada so'rov yuboradi, disk operatsiyasi shart emas).
 let cache = null;
 
-function load() {
-  if (cache) return cache;
-  ensureStore();
-  const store = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+// Yetishmayotgan maydonlarni to'ldiradi va eski formatlarni yangisiga o'tkazadi
+function normalize(store) {
+  // Eski (bitta menyuli) formatdan avtomatik migratsiya
+  if (!store.restaurants) {
+    store.restaurants = store.menu
+      ? [{ id: 1, name: "Standart menyu", url: null, items: store.menu }]
+      : DEFAULT_RESTAURANTS;
+    store.orders = (store.orders || []).map((o) => ({
+      restaurant_id: 1,
+      restaurant_name: "Standart menyu",
+      ...o,
+    }));
+    delete store.menu;
+  }
+  if (!store.orders) store.orders = [];
   if (!store.comments) store.comments = [];
   if (!store.deliveryFees) store.deliveryFees = {};
   if (!store.payments) store.payments = [];
   if (!store.settings) store.settings = {};
-  if (!store.users) store.users = [];
-
-  // Eski (bitta menyuli) formatdan avtomatik migratsiya
-  if (!store.restaurants && store.menu) {
-    const migrated = {
-      restaurants: [{ id: 1, name: "Standart menyu", url: null, items: store.menu }],
-      orders: (store.orders || []).map((o) => ({
-        ...o,
-        restaurant_id: 1,
-        restaurant_name: "Standart menyu",
-      })),
-    };
-    save(migrated);
-    return migrated;
-  }
-  cache = store;
+  delete store.users; // eski, ishlatilmaydigan maydon
   return store;
 }
 
+function load() {
+  if (cache) return cache;
+  const dir = path.dirname(DB_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const store = fs.existsSync(DB_PATH)
+    ? JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'))
+    : { restaurants: DEFAULT_RESTAURANTS };
+  save(normalize(store));
+  return cache;
+}
+
+// Avval vaqtinchalik faylga yozib, keyin almashtiramiz — yozish paytida
+// server o'chib qolsa ham store.json buzilmaydi.
 function save(store) {
   cache = store;
-  fs.writeFileSync(DB_PATH, JSON.stringify(store, null, 2));
+  const tmp = `${DB_PATH}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2));
+  fs.renameSync(tmp, DB_PATH);
 }
 
 function nextId(list) {
   return list.length ? Math.max(...list.map((x) => x.id)) + 1 : 1;
+}
+
+// /images/... ko'rinishidagi, bizning serverga yuklab olingan rasmni diskdan o'chiradi
+function removeLocalImage(image) {
+  if (!image || !image.startsWith('/images/')) return;
+  const file = path.join(IMAGES_DIR, path.basename(image));
+  fs.promises.unlink(file).catch(() => {});
 }
 
 // ---------- Restoranlar ----------
@@ -107,10 +118,12 @@ function setRestaurantUrl(id, url) {
 
 function deleteRestaurant(id) {
   const store = load();
-  const before = store.restaurants.length;
-  store.restaurants = store.restaurants.filter((r) => r.id !== Number(id));
+  const restaurant = store.restaurants.find((r) => r.id === Number(id));
+  if (!restaurant) return false;
+  store.restaurants = store.restaurants.filter((r) => r !== restaurant);
+  restaurant.items.forEach((i) => removeLocalImage(i.image));
   save(store);
-  return store.restaurants.length < before;
+  return true;
 }
 
 function addMenuItem(restaurantId, name, price, image = null) {
@@ -123,25 +136,34 @@ function addMenuItem(restaurantId, name, price, image = null) {
   return item;
 }
 
-function setMenuItemImage(restaurantId, itemId, image) {
+// Taomning narxi va/yoki rasmini yangilaydi (faqat berilgan maydonlar o'zgaradi)
+function updateMenuItem(restaurantId, itemId, patch) {
   const store = load();
   const restaurant = store.restaurants.find((r) => r.id === Number(restaurantId));
-  if (!restaurant) return false;
-  const item = restaurant.items.find((i) => i.id === Number(itemId));
-  if (!item) return false;
-  item.image = image || null;
+  const item = restaurant?.items.find((i) => i.id === Number(itemId));
+  if (!item) return null;
+  if (patch.price !== undefined) item.price = patch.price;
+  if (patch.image !== undefined) {
+    if (item.image !== patch.image) removeLocalImage(item.image);
+    item.image = patch.image || null;
+  }
   save(store);
-  return true;
+  return item;
+}
+
+function setMenuItemImage(restaurantId, itemId, image) {
+  return !!updateMenuItem(restaurantId, itemId, { image: image || null });
 }
 
 function deleteMenuItem(restaurantId, itemId) {
   const store = load();
   const restaurant = store.restaurants.find((r) => r.id === Number(restaurantId));
-  if (!restaurant) return false;
-  const before = restaurant.items.length;
-  restaurant.items = restaurant.items.filter((i) => i.id !== Number(itemId));
+  const item = restaurant?.items.find((i) => i.id === Number(itemId));
+  if (!item) return false;
+  restaurant.items = restaurant.items.filter((i) => i !== item);
+  removeLocalImage(item.image);
   save(store);
-  return restaurant.items.length < before;
+  return true;
 }
 
 // ---------- Buyurtmalar ----------
@@ -159,50 +181,26 @@ function getUserOrderItems(date, userId, restaurantId) {
     .map((o) => ({ name: o.item_name, price: o.price, qty: o.qty }));
 }
 
-// Foydalanuvchining shu kun + shu restoran bo'yicha buyurtmasini almashtiradi
-// (eskisini butunlay o'chirib, yangisini yozadi). Boshqa restoranlardagi
-// buyurtmalariga tegmaydi.
-function replaceUserOrder(date, userId, userName, restaurantId, restaurantName, items) {
-  const store = load();
-  store.orders = store.orders.filter(
-    (o) => !(o.date === date && o.user_id === userId && o.restaurant_id === restaurantId)
-  );
-  for (const item of items) {
-    if (item.qty > 0) {
-      store.orders.push({
-        date,
-        user_id: userId,
-        user_name: userName,
-        restaurant_id: restaurantId,
-        restaurant_name: restaurantName,
-        item_name: item.name,
-        price: item.price,
-        qty: item.qty,
-      });
-    }
-  }
-  save(store);
+function userHasOrder(date, userId) {
+  return load().orders.some((o) => o.date === date && o.user_id === userId);
 }
 
 // Foydalanuvchi qayta kirib yana taom tanlasa, buni MAVJUD buyurtmasiga
 // QO'SHADI (masalan avval 2 osh bergan, yana 1 osh qo'shsa — natija 3 osh
 // bo'ladi). Buyurtma faqat foydalanuvchi "Bekor qilish" tugmasini
 // bosgandagina (clearUserOrder) o'chadi.
+// newItems server tomonida menyudan olingan bo'lishi shart: [{ name, price, qty }]
 function addToUserOrder(date, userId, userName, restaurantId, restaurantName, newItems) {
   const store = load();
-  const existing = store.orders.filter(
-    (o) => o.date === date && o.user_id === userId && o.restaurant_id === restaurantId
-  );
-  const others = store.orders.filter(
-    (o) => !(o.date === date && o.user_id === userId && o.restaurant_id === restaurantId)
-  );
+  const isMine = (o) => o.date === date && o.user_id === userId && o.restaurant_id === restaurantId;
+  const existing = store.orders.filter(isMine);
+  const others = store.orders.filter((o) => !isMine(o));
 
   const merged = {}; // item_name -> { item_name, price, qty }
   for (const row of existing) {
     merged[row.item_name] = { item_name: row.item_name, price: row.price, qty: row.qty };
   }
   for (const item of newItems) {
-    if (item.qty <= 0) continue;
     if (merged[item.name]) {
       merged[item.name].qty += item.qty;
       merged[item.name].price = item.price; // narx yangilangan bo'lishi mumkin, so'nggisini olamiz
@@ -228,12 +226,9 @@ function addToUserOrder(date, userId, userName, restaurantId, restaurantName, ne
 
 function clearUserOrder(date, userId, restaurantId) {
   const store = load();
-  store.orders = store.orders.filter(
-    (o) => !(o.date === date && o.user_id === userId && o.restaurant_id === restaurantId)
-  );
-  store.comments = store.comments.filter(
-    (c) => !(c.date === date && c.user_id === userId && c.restaurant_id === restaurantId)
-  );
+  const isMine = (o) => o.date === date && o.user_id === userId && o.restaurant_id === restaurantId;
+  store.orders = store.orders.filter((o) => !isMine(o));
+  store.comments = store.comments.filter((c) => !isMine(c));
   save(store);
 }
 
@@ -290,15 +285,19 @@ function cleanupOldData(daysToKeep) {
   cutoff.setUTCDate(cutoff.getUTCDate() - daysToKeep);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
 
-  const beforeOrders = store.orders.length;
-  store.orders = store.orders.filter((o) => o.date >= cutoffStr);
-  store.comments = store.comments.filter((c) => c.date >= cutoffStr);
-  store.payments = store.payments.filter((p) => p.date >= cutoffStr);
+  let removed = 0;
+  for (const key of ['orders', 'comments', 'payments']) {
+    const before = store[key].length;
+    store[key] = store[key].filter((x) => x.date >= cutoffStr);
+    removed += before - store[key].length;
+  }
   for (const date of Object.keys(store.deliveryFees)) {
-    if (date < cutoffStr) delete store.deliveryFees[date];
+    if (date < cutoffStr) {
+      delete store.deliveryFees[date];
+      removed++;
+    }
   }
 
-  const removed = beforeOrders - store.orders.length;
   if (removed > 0) save(store);
   return removed;
 }
@@ -341,20 +340,24 @@ function getDeliveryFee(date) {
 
 // ---------- To'lov holati ----------
 
-function setPaymentStatus(date, userId, paid) {
+// status: PAID, PENDING yoki null (to'lanmagan)
+function setPaymentStatus(date, userId, status) {
   const store = load();
   store.payments = store.payments.filter((p) => !(p.date === date && p.user_id === userId));
-  if (paid) store.payments.push({ date, user_id: userId });
+  if (status) store.payments.push({ date, user_id: userId, status });
   save(store);
 }
 
-function getPaidUserIds(date) {
-  return load()
-    .payments.filter((p) => p.date === date)
-    .map((p) => p.user_id);
+// user_id -> 'paid' | 'pending'. Eski yozuvlarda status yo'q — ular to'langan hisoblanadi.
+function getPaymentStatuses(date) {
+  const map = {};
+  for (const p of load().payments) {
+    if (p.date === date) map[p.user_id] = p.status || PAID;
+  }
+  return map;
 }
 
-// ---------- Umumiy sozlamalar (buyurtma vaqti, eslatma) ----------
+// ---------- Umumiy sozlamalar (karta, eslatma) ----------
 
 function getSettings() {
   return load().settings;
@@ -367,41 +370,22 @@ function updateSettings(patch) {
   return store.settings;
 }
 
-// ---------- Foydalanuvchilar ro'yxati (xabar yuborish uchun) ----------
-
-// Botga hech bo'lmaganda bir marta yozgan (yoki buyruq yuborgan) har bir
-// odamni saqlaydi — keyinchalik /xabar orqali hammaga yuborish uchun kerak.
-function registerUser(userId, userName) {
-  const store = load();
-  if (!store.users) store.users = [];
-  const existing = store.users.find((u) => u.user_id === userId);
-  if (existing) {
-    if (existing.user_name !== userName) {
-      existing.user_name = userName;
-      save(store);
-    }
-  } else {
-    store.users.push({ user_id: userId, user_name: userName });
-    save(store);
-  }
-}
-
-function getAllUsers() {
-  return load().users || [];
-}
-
 module.exports = {
+  IMAGES_DIR,
+  PAID,
+  PENDING,
   getRestaurants,
   getRestaurant,
   addRestaurant,
   setRestaurantUrl,
   deleteRestaurant,
   addMenuItem,
+  updateMenuItem,
   setMenuItemImage,
   deleteMenuItem,
   getOrders,
   getUserOrderItems,
-  replaceUserOrder,
+  userHasOrder,
   addToUserOrder,
   clearUserOrder,
   removeItemFromOrder,
@@ -413,9 +397,7 @@ module.exports = {
   setDeliveryFee,
   getDeliveryFee,
   setPaymentStatus,
-  getPaidUserIds,
+  getPaymentStatuses,
   getSettings,
   updateSettings,
-  registerUser,
-  getAllUsers,
 };
